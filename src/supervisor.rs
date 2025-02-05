@@ -5,7 +5,7 @@ use crate::core::{
 use crate::ExitReason;
 use ractor::concurrency::{sleep, Duration, JoinHandle};
 use ractor::{
-    Actor, ActorCell, ActorName, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr,
+    cast, Actor, ActorCell, ActorName, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr,
     SupervisionEvent,
 };
 use std::collections::HashMap;
@@ -69,6 +69,8 @@ pub enum SupervisorMsg {
     RestForOneSpawn { child_id: String },
     /// Return the current state snapshot (for debugging/tests).
     InspectState(RpcReplyPort<SupervisorState>),
+    /// Attaches a monitor to the actor which will receive messages when an actor is restarted
+    AttachMonitor(ActorRef<SupervisionEvent>),
 }
 
 /// The arguments needed to spawn the supervisor.
@@ -97,6 +99,9 @@ pub struct SupervisorState {
 
     /// Supervisor meltdown options.
     pub options: SupervisorOptions,
+
+    /// A monitor which will receive all handled events by ractor-supervisor
+    pub monitor_actor: Option<ActorRef<SupervisionEvent>>,
 }
 
 impl SupervisorCore for SupervisorState {
@@ -139,6 +144,7 @@ impl SupervisorState {
             child_failure_state: HashMap::new(),
             restart_log: Vec::new(),
             options: args.options,
+            monitor_actor: None,
         }
     }
 
@@ -335,6 +341,10 @@ impl Actor for Supervisor {
                 rpc_reply_port.send(state.clone())?;
                 Ok(())
             }
+            SupervisorMsg::AttachMonitor(monitor) => {
+                state.monitor_actor = Some(monitor);
+                Ok(())
+            }
         };
 
         #[cfg(test)]
@@ -355,7 +365,7 @@ impl Actor for Supervisor {
         evt: SupervisionEvent,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match evt {
+        match &evt {
             SupervisionEvent::ActorStarted(cell) => {
                 let child_id = cell
                     .get_name()
@@ -406,6 +416,11 @@ impl Actor for Supervisor {
             }
             SupervisionEvent::ProcessGroupChanged(_group) => {}
         }
+
+        if let Some(monitor) = &state.monitor_actor {
+            let _ = cast!(monitor, evt);
+        }
+
         Ok(())
     }
 
